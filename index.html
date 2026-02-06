@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hand Noise Art — Bri-yarni</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+  #canvas { width: 100%; height: 100%; display: block; }
+  #webcam { position: absolute; top: 0; left: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  #overlay {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.85); color: #fff; font-family: 'Segoe UI', system-ui, sans-serif;
+    z-index: 100; transition: opacity 0.8s;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #overlay h1 { font-size: 2.5rem; font-weight: 300; margin-bottom: 0.5rem; letter-spacing: 0.1em; }
+  #overlay p { font-size: 1rem; opacity: 0.7; margin-bottom: 2rem; }
+  #startBtn {
+    padding: 1rem 3rem; font-size: 1.1rem; border: 1px solid rgba(255,255,255,0.3);
+    background: transparent; color: #fff; cursor: pointer; border-radius: 2rem;
+    transition: all 0.3s; letter-spacing: 0.05em;
+  }
+  #startBtn:hover { background: rgba(255,255,255,0.1); border-color: rgba(255,255,255,0.6); }
+  #status { position: fixed; bottom: 1rem; left: 1rem; color: rgba(255,255,255,0.4); font-family: monospace; font-size: 0.75rem; z-index: 50; }
+  #gesture { position: fixed; top: 1rem; right: 1rem; color: rgba(255,255,255,0.5); font-family: monospace; font-size: 0.85rem; z-index: 50; }
+</style>
+</head>
+<body>
+
+<video id="webcam" autoplay playsinline></video>
+<canvas id="canvas"></canvas>
+
+<div id="overlay">
+  <h1>Hand Noise Art</h1>
+  <p>webcam + microphone + noise — by Bri-yarni</p>
+  <button id="startBtn">Begin</button>
+</div>
+
+<div id="status"></div>
+<div id="gesture"></div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+// ═══════════════════════════════════════════════════════
+// GLSL NOISE LIBRARY (shared across shaders)
+// ═══════════════════════════════════════════════════════
+
+const NOISE_GLSL = /* glsl */`
+// Simplex 3D noise — ashima/webgl-noise
+vec3 mod289(vec3 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
+vec4 mod289(vec4 x) { return x - floor(x * (1.0/289.0)) * 289.0; }
+vec4 permute(vec4 x) { return mod289(((x*34.0)+10.0)*x); }
+vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+
+float snoise(vec3 v) {
+  const vec2 C = vec2(1.0/6.0, 1.0/3.0);
+  const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
+
+  vec3 i = floor(v + dot(v, C.yyy));
+  vec3 x0 = v - i + dot(i, C.xxx);
+
+  vec3 g = step(x0.yzx, x0.xyz);
+  vec3 l = 1.0 - g;
+  vec3 i1 = min(g.xyz, l.zxy);
+  vec3 i2 = max(g.xyz, l.zxy);
+
+  vec3 x1 = x0 - i1 + C.xxx;
+  vec3 x2 = x0 - i2 + C.yyy;
+  vec3 x3 = x0 - D.yyy;
+
+  i = mod289(i);
+  vec4 p = permute(permute(permute(
+    i.z + vec4(0.0, i1.z, i2.z, 1.0))
+    + i.y + vec4(0.0, i1.y, i2.y, 1.0))
+    + i.x + vec4(0.0, i1.x, i2.x, 1.0));
+
+  float n_ = 0.142857142857;
+  vec3 ns = n_ * D.wyz - D.xzx;
+
+  vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
+
+  vec4 x_ = floor(j * ns.z);
+  vec4 y_ = floor(j - 7.0 * x_);
+
+  vec4 x = x_ * ns.x + ns.yyyy;
+  vec4 y = y_ * ns.x + ns.yyyy;
+  vec4 h = 1.0 - abs(x) - abs(y);
+
+  vec4 b0 = vec4(x.xy, y.xy);
+  vec4 b1 = vec4(x.zw, y.zw);
+
+  vec4 s0 = floor(b0)*2.0 + 1.0;
+  vec4 s1 = floor(b1)*2.0 + 1.0;
+  vec4 sh = -step(h, vec4(0.0));
+
+  vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
+  vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
+
+  vec3 p0 = vec3(a0.xy, h.x);
+  vec3 p1 = vec3(a0.zw, h.y);
+  vec3 p2 = vec3(a1.xy, h.z);
+  vec3 p3 = vec3(a1.zw, h.w);
+
+  vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
+  p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
+
+  vec4 m = max(0.5 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
+  m = m * m;
+  return 105.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+}
+
+// Fractal Brownian Motion (KlakMath Noise.Fractal equivalent)
+float fbm(vec3 p, int octaves) {
+  float value = 0.0;
+  float amplitude = 0.5;
+  float frequency = 1.0;
+  for (int i = 0; i < 6; i++) {
+    if (i >= octaves) break;
+    value += amplitude * snoise(p * frequency);
+    frequency *= 2.0;
+    amplitude *= 0.5;
+  }
+  return value;
+}
+`;
+
+// ═══════════════════════════════════════════════════════
+// PARTICLE SHADERS
+// ═══════════════════════════════════════════════════════
+
+const particleVertexShader = /* glsl */`
+${NOISE_GLSL}
+
+uniform float uTime;
+uniform vec3 uHandPos;
+uniform float uHandActive;
+uniform float uBass;
+uniform float uTreble;
+uniform float uMid;
+uniform float uGesture; // 0=none, 1=open, -1=fist, 2=pinch
+uniform float uPinchBurst;
+
+attribute vec3 aRandom;
+attribute float aIndex;
+
+varying float vAlpha;
+varying float vColorMix;
+varying float vDist;
+
+void main() {
+  vec3 pos = position;
+  float idx = aIndex;
+
+  // Base noise motion
+  float noiseFreq = 1.5 + uTreble * 2.0;
+  float noiseAmp = 0.3 + uBass * 0.5;
+  vec3 noiseOffset = vec3(
+    snoise(vec3(pos.x * noiseFreq, pos.y * noiseFreq, uTime * 0.3 + idx * 0.01)),
+    snoise(vec3(pos.y * noiseFreq, pos.z * noiseFreq, uTime * 0.3 + 100.0 + idx * 0.01)),
+    snoise(vec3(pos.z * noiseFreq, pos.x * noiseFreq, uTime * 0.3 + 200.0 + idx * 0.01))
+  ) * noiseAmp;
+
+  pos += noiseOffset;
+
+  // Hand attraction / repulsion
+  if (uHandActive > 0.5) {
+    vec3 toHand = uHandPos - pos;
+    float dist = length(toHand);
+    vec3 dir = normalize(toHand);
+
+    if (uGesture > 0.5 && uGesture < 1.5) {
+      // Open palm — spread outward
+      float spread = smoothstep(3.0, 0.0, dist) * 1.5;
+      pos -= dir * spread;
+    } else if (uGesture < -0.5) {
+      // Fist — compress inward
+      float attract = smoothstep(5.0, 0.0, dist) * 2.0;
+      pos += dir * attract;
+    } else {
+      // Default — gentle orbit
+      float attract = smoothstep(4.0, 0.0, dist) * 0.8;
+      pos += dir * attract;
+    }
+
+    // Pinch burst
+    if (uPinchBurst > 0.01) {
+      float burstForce = uPinchBurst * smoothstep(3.0, 0.0, dist) * 2.0;
+      pos -= dir * burstForce;
+    }
+  }
+
+  // Audio reactive swirl
+  float angle = uTime * 0.5 + idx * 6.283;
+  pos.x += sin(angle) * uMid * 0.3;
+  pos.z += cos(angle) * uMid * 0.3;
+
+  vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+
+  // Point size: bass makes bigger
+  float size = (3.0 + uBass * 12.0 + aRandom.x * 3.0);
+  gl_PointSize = size * (300.0 / -mvPosition.z);
+
+  gl_Position = projectionMatrix * mvPosition;
+
+  vAlpha = 0.4 + uBass * 0.4 + aRandom.y * 0.2;
+  vColorMix = 0.5 + uMid * 0.5 + snoise(pos * 0.5 + uTime * 0.2) * 0.3;
+  vDist = length(pos - uHandPos);
+}
+`;
+
+const particleFragmentShader = /* glsl */`
+uniform float uTime;
+uniform float uBass;
+uniform float uMid;
+uniform float uTreble;
+uniform float uHue;
+
+varying float vAlpha;
+varying float vColorMix;
+varying float vDist;
+
+vec3 hsl2rgb(float h, float s, float l) {
+  vec3 rgb = clamp(abs(mod(h*6.0+vec3(0.0,4.0,2.0),6.0)-3.0)-1.0, 0.0, 1.0);
+  return l + s * (rgb - 0.5) * (1.0 - abs(2.0 * l - 1.0));
+}
+
+void main() {
+  // Circular point sprite
+  vec2 center = gl_PointCoord - 0.5;
+  float dist = length(center);
+  if (dist > 0.5) discard;
+
+  float alpha = smoothstep(0.5, 0.1, dist) * vAlpha;
+
+  // Color from audio spectrum
+  float hue = uHue + vColorMix * 0.3 + uTreble * 0.1;
+  float sat = 0.6 + uMid * 0.3;
+  float lit = 0.4 + uBass * 0.3;
+  vec3 color = hsl2rgb(mod(hue, 1.0), sat, lit);
+
+  // Proximity glow near hand
+  float handGlow = smoothstep(3.0, 0.5, vDist) * 0.3;
+  color += handGlow;
+
+  gl_FragColor = vec4(color, alpha);
+}
+`;
+
+// ═══════════════════════════════════════════════════════
+// MESH SHADERS (deformable icosphere)
+// ═══════════════════════════════════════════════════════
+
+const meshVertexShader = /* glsl */`
+${NOISE_GLSL}
+
+uniform float uTime;
+uniform float uBass;
+uniform float uTreble;
+uniform float uMid;
+uniform vec3 uHandPos;
+uniform float uHandActive;
+
+varying vec3 vNormal;
+varying vec3 vPosition;
+varying float vDisplacement;
+
+void main() {
+  vec3 pos = position;
+  vec3 norm = normal;
+
+  // Noise displacement — KlakMath Noise.Float equivalent
+  float noiseFreq = 1.2 + uTreble * 3.0;
+  float noiseAmp = 0.15 + uBass * 0.6;
+  float displacement = fbm(pos * noiseFreq + uTime * 0.4, 4) * noiseAmp;
+
+  // Audio pulse
+  displacement += sin(uTime * 3.0) * uBass * 0.1;
+
+  pos += norm * displacement;
+
+  vNormal = normalMatrix * norm;
+  vPosition = (modelMatrix * vec4(pos, 1.0)).xyz;
+  vDisplacement = displacement;
+
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+}
+`;
+
+const meshFragmentShader = /* glsl */`
+uniform float uTime;
+uniform float uBass;
+uniform float uMid;
+uniform float uTreble;
+uniform float uHue;
+uniform vec3 uHandPos;
+uniform float uHandActive;
+
+varying vec3 vNormal;
+varying vec3 vPosition;
+varying float vDisplacement;
+
+vec3 hsl2rgb(float h, float s, float l) {
+  vec3 rgb = clamp(abs(mod(h*6.0+vec3(0.0,4.0,2.0),6.0)-3.0)-1.0, 0.0, 1.0);
+  return l + s * (rgb - 0.5) * (1.0 - abs(2.0 * l - 1.0));
+}
+
+void main() {
+  // Fresnel-like rim lighting
+  vec3 viewDir = normalize(cameraPosition - vPosition);
+  float rim = 1.0 - max(dot(viewDir, normalize(vNormal)), 0.0);
+  rim = pow(rim, 2.0);
+
+  // Base color shifts with audio
+  float hue = uHue + 0.5 + vDisplacement * 2.0 + uMid * 0.15;
+  float sat = 0.5 + uTreble * 0.3;
+  float lit = 0.2 + rim * 0.5 + uBass * 0.2;
+  vec3 color = hsl2rgb(mod(hue, 1.0), sat, lit);
+
+  // Wireframe-like edge glow from displacement
+  float edge = fract(vDisplacement * 8.0);
+  edge = smoothstep(0.0, 0.05, edge) * smoothstep(0.1, 0.05, edge);
+  color += edge * 0.3;
+
+  // Hand proximity glow
+  if (uHandActive > 0.5) {
+    float handDist = length(vPosition - uHandPos);
+    float handGlow = smoothstep(3.0, 0.5, handDist) * 0.4;
+    color += vec3(handGlow * 0.5, handGlow * 0.3, handGlow * 0.8);
+  }
+
+  float alpha = 0.6 + rim * 0.3 + uBass * 0.1;
+  gl_FragColor = vec4(color, alpha);
+}
+`;
+
+// ═══════════════════════════════════════════════════════
+// BACKGROUND SHADER (fullscreen quad)
+// ═══════════════════════════════════════════════════════
+
+const bgVertexShader = /* glsl */`
+varying vec2 vUv;
+void main() {
+  vUv = uv;
+  gl_Position = vec4(position, 1.0);
+}
+`;
+
+const bgFragmentShader = /* glsl */`
+${NOISE_GLSL}
+
+uniform float uTime;
+uniform vec2 uResolution;
+uniform vec3 uHandPos;
+uniform float uHandActive;
+uniform float uBass;
+uniform float uMid;
+uniform float uTreble;
+uniform float uHue;
+
+varying vec2 vUv;
+
+vec3 hsl2rgb(float h, float s, float l) {
+  vec3 rgb = clamp(abs(mod(h*6.0+vec3(0.0,4.0,2.0),6.0)-3.0)-1.0, 0.0, 1.0);
+  return l + s * (rgb - 0.5) * (1.0 - abs(2.0 * l - 1.0));
+}
+
+void main() {
+  vec2 uv = vUv;
+  vec2 aspect = vec2(uResolution.x / uResolution.y, 1.0);
+
+  // Create flowing noise field
+  vec3 noisePos = vec3(uv * aspect * 2.0, uTime * 0.15);
+  float noiseFreq = 1.5 + uTreble * 2.0;
+
+  float n1 = fbm(noisePos * noiseFreq, 4);
+  float n2 = fbm(noisePos * noiseFreq * 0.5 + vec3(5.0, 3.0, uTime * 0.1), 3);
+
+  // Hand distortion
+  if (uHandActive > 0.5) {
+    vec2 handUV = uHandPos.xy * 0.5 + 0.5; // map from [-1,1] to [0,1] range roughly
+    handUV = vec2(0.5 + uHandPos.x * 0.3, 0.5 - uHandPos.y * 0.3);
+    vec2 toHand = (uv - handUV) * aspect;
+    float handDist = length(toHand);
+    float distortion = smoothstep(0.8, 0.0, handDist) * 0.3;
+    n1 += distortion * sin(handDist * 10.0 - uTime * 3.0);
+  }
+
+  // Color mapping — bass=deep blue, mid=purple, treble=pink
+  float hue1 = uHue + 0.6 + n1 * 0.15; // blue range
+  float hue2 = uHue + 0.85 + n2 * 0.1;  // pink range
+  float mixFactor = uMid * 0.5 + n2 * 0.3 + 0.3;
+
+  vec3 col1 = hsl2rgb(mod(hue1, 1.0), 0.6, 0.08 + uBass * 0.1);
+  vec3 col2 = hsl2rgb(mod(hue2, 1.0), 0.5, 0.05 + uTreble * 0.08);
+  vec3 color = mix(col1, col2, mixFactor);
+
+  // Subtle noise grain
+  color += (n1 * 0.5 + 0.5) * 0.04;
+
+  // Vignette
+  float vignette = 1.0 - smoothstep(0.3, 1.2, length(uv - 0.5));
+  color *= vignette * 0.8 + 0.2;
+
+  gl_FragColor = vec4(color, 1.0);
+}
+`;
+
+// ═══════════════════════════════════════════════════════
+// XXHASH (deterministic seeding — KlakMath port)
+// ═══════════════════════════════════════════════════════
+
+function xxhash(seed) {
+  let h = seed | 0;
+  h = Math.imul(h ^ (h >>> 15), 0x85EBCA77);
+  h = Math.imul(h ^ (h >>> 13), 0xC2B2AE3D);
+  h = h ^ (h >>> 16);
+  return (h >>> 0) / 0xFFFFFFFF;
+}
+
+function xxhashRange(min, max, seed) {
+  return min + xxhash(seed) * (max - min);
+}
+
+// ═══════════════════════════════════════════════════════
+// EXPTWEEN (KlakMath ExpTween.Step equivalent)
+// ═══════════════════════════════════════════════════════
+
+function expTween(current, target, speed, dt) {
+  return current + (target - current) * (1 - Math.exp(-speed * dt));
+}
+
+// ═══════════════════════════════════════════════════════
+// CDS TWEEN (KlakMath CdsTween — critically damped spring)
+// ═══════════════════════════════════════════════════════
+
+class CdsTween {
+  constructor(value = 0, speed = 4) {
+    this.value = value;
+    this.velocity = 0;
+    this.speed = speed;
+  }
+  step(target, dt) {
+    const n1 = this.velocity - (this.value - target) * (this.speed * this.speed * dt);
+    const n2 = 1 + this.speed * dt;
+    this.velocity = n1 / (n2 * n2);
+    this.value += this.velocity * dt;
+    return this.value;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// APP STATE
+// ═══════════════════════════════════════════════════════
+
+const state = {
+  handActive: 0,
+  handPos: new THREE.Vector3(0, 0, 0),
+  handPosSmooth: new THREE.Vector3(0, 0, 0),
+  palmVelocity: new THREE.Vector3(0, 0, 0),
+  prevPalmPos: new THREE.Vector3(0, 0, 0),
+  fingerExtended: [false, false, false, false, false],
+  pinchDist: 1,
+  gesture: 0, // 0=none, 1=open, -1=fist, 2=pinch
+  gestureSmooth: new CdsTween(0, 6),
+  pinchBurst: new CdsTween(0, 8),
+  twoHands: false,
+  secondHandPos: new THREE.Vector3(0, 0, 0),
+
+  bass: 0, mid: 0, treble: 0,
+  bassSmooth: new CdsTween(0, 8),
+  midSmooth: new CdsTween(0, 8),
+  trebleSmooth: new CdsTween(0, 8),
+
+  hue: 0,
+  time: 0,
+};
+
+// ═══════════════════════════════════════════════════════
+// THREE.JS SETUP
+// ═══════════════════════════════════════════════════════
+
+const canvas = document.getElementById('canvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.z = 5;
+
+// Post-processing
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.8, 0.4, 0.85
+);
+composer.addPass(bloomPass);
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  if (bgMaterial) {
+    bgMaterial.uniforms.uResolution.value.set(window.innerWidth, window.innerHeight);
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+// LAYER 3: BACKGROUND SHADER (rendered first, behind everything)
+// ═══════════════════════════════════════════════════════
+
+const bgMaterial = new THREE.ShaderMaterial({
+  vertexShader: bgVertexShader,
+  fragmentShader: bgFragmentShader,
+  uniforms: {
+    uTime: { value: 0 },
+    uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+    uHandPos: { value: new THREE.Vector3() },
+    uHandActive: { value: 0 },
+    uBass: { value: 0 },
+    uMid: { value: 0 },
+    uTreble: { value: 0 },
+    uHue: { value: 0 },
+  },
+  depthWrite: false,
+  depthTest: false,
+});
+
+const bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMaterial);
+bgMesh.frustumCulled = false;
+bgMesh.renderOrder = -1;
+
+// Use a separate scene for background
+const bgScene = new THREE.Scene();
+const bgCamera = new THREE.Camera();
+bgScene.add(bgMesh);
+
+// ═══════════════════════════════════════════════════════
+// LAYER 1: PARTICLE CLOUD (10k particles)
+// ═══════════════════════════════════════════════════════
+
+const PARTICLE_COUNT = 10000;
+const particleGeo = new THREE.BufferGeometry();
+
+const positions = new Float32Array(PARTICLE_COUNT * 3);
+const randoms = new Float32Array(PARTICLE_COUNT * 3);
+const indices = new Float32Array(PARTICLE_COUNT);
+
+for (let i = 0; i < PARTICLE_COUNT; i++) {
+  // Spherical distribution using xxhash for deterministic seeding
+  const theta = xxhashRange(0, Math.PI * 2, i * 3);
+  const phi = Math.acos(xxhashRange(-1, 1, i * 3 + 1));
+  const r = xxhashRange(0.5, 3.5, i * 3 + 2);
+
+  positions[i * 3] = r * Math.sin(phi) * Math.cos(theta);
+  positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta);
+  positions[i * 3 + 2] = r * Math.cos(phi);
+
+  randoms[i * 3] = xxhash(i * 7);
+  randoms[i * 3 + 1] = xxhash(i * 7 + 1);
+  randoms[i * 3 + 2] = xxhash(i * 7 + 2);
+
+  indices[i] = i;
+}
+
+particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+particleGeo.setAttribute('aRandom', new THREE.BufferAttribute(randoms, 3));
+particleGeo.setAttribute('aIndex', new THREE.BufferAttribute(indices, 1));
+
+const particleMaterial = new THREE.ShaderMaterial({
+  vertexShader: particleVertexShader,
+  fragmentShader: particleFragmentShader,
+  uniforms: {
+    uTime: { value: 0 },
+    uHandPos: { value: new THREE.Vector3() },
+    uHandActive: { value: 0 },
+    uBass: { value: 0 },
+    uMid: { value: 0 },
+    uTreble: { value: 0 },
+    uHue: { value: 0 },
+    uGesture: { value: 0 },
+    uPinchBurst: { value: 0 },
+  },
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+
+const particles = new THREE.Points(particleGeo, particleMaterial);
+scene.add(particles);
+
+// ═══════════════════════════════════════════════════════
+// LAYER 2: DEFORMABLE MESH (icosphere)
+// ═══════════════════════════════════════════════════════
+
+const icoGeo = new THREE.IcosahedronGeometry(1.2, 5);
+const meshMaterial = new THREE.ShaderMaterial({
+  vertexShader: meshVertexShader,
+  fragmentShader: meshFragmentShader,
+  uniforms: {
+    uTime: { value: 0 },
+    uBass: { value: 0 },
+    uMid: { value: 0 },
+    uTreble: { value: 0 },
+    uHue: { value: 0 },
+    uHandPos: { value: new THREE.Vector3() },
+    uHandActive: { value: 0 },
+  },
+  transparent: true,
+  wireframe: false,
+  side: THREE.DoubleSide,
+});
+
+const icoMesh = new THREE.Mesh(icoGeo, meshMaterial);
+scene.add(icoMesh);
+
+// ═══════════════════════════════════════════════════════
+// MIRROR MESH (for two-hands symmetry mode)
+// ═══════════════════════════════════════════════════════
+
+const mirrorMesh = icoMesh.clone();
+mirrorMesh.material = meshMaterial.clone();
+mirrorMesh.visible = false;
+scene.add(mirrorMesh);
+
+// ═══════════════════════════════════════════════════════
+// AUDIO SETUP
+// ═══════════════════════════════════════════════════════
+
+let audioCtx, analyser, audioData;
+
+async function setupAudio() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new AudioContext();
+    const source = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.8;
+    source.connect(analyser);
+    audioData = new Uint8Array(analyser.frequencyBinCount);
+    updateStatus('mic: on');
+    return true;
+  } catch (e) {
+    console.warn('Microphone not available:', e);
+    updateStatus('mic: off (no permission)');
+    return false;
+  }
+}
+
+function analyzeAudio() {
+  if (!analyser) return;
+  analyser.getByteFrequencyData(audioData);
+
+  const bins = audioData.length; // 256
+  let bassSum = 0, midSum = 0, trebleSum = 0;
+  const bassEnd = Math.floor(bins * 0.15);
+  const midEnd = Math.floor(bins * 0.5);
+
+  for (let i = 0; i < bins; i++) {
+    const val = audioData[i] / 255;
+    if (i < bassEnd) bassSum += val;
+    else if (i < midEnd) midSum += val;
+    else trebleSum += val;
+  }
+
+  state.bass = bassSum / bassEnd;
+  state.mid = midSum / (midEnd - bassEnd);
+  state.treble = trebleSum / (bins - midEnd);
+}
+
+// ═══════════════════════════════════════════════════════
+// HAND TRACKING SETUP (MediaPipe Hands via Vision API)
+// ═══════════════════════════════════════════════════════
+
+let handDetector = null;
+
+async function setupHandTracking() {
+  try {
+    // Load MediaPipe vision tasks
+    const { FilesetResolver, HandLandmarker } = await import(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/vision_bundle.mjs'
+    );
+
+    const vision = await FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+    );
+
+    handDetector = await HandLandmarker.createFromOptions(vision, {
+      baseOptions: {
+        modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+        delegate: 'GPU',
+      },
+      runningMode: 'VIDEO',
+      numHands: 2,
+      minHandDetectionConfidence: 0.5,
+      minHandPresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+
+    updateStatus('hands: ready');
+    return true;
+  } catch (e) {
+    console.warn('Hand tracking setup failed:', e);
+    updateStatus('hands: failed — ' + e.message);
+    return false;
+  }
+}
+
+// Landmark indices
+const WRIST = 0, THUMB_TIP = 4, INDEX_TIP = 8, MIDDLE_TIP = 12, RING_TIP = 16, PINKY_TIP = 20;
+const THUMB_MCP = 2, INDEX_MCP = 5, MIDDLE_MCP = 9, RING_MCP = 13, PINKY_MCP = 17;
+const FINGER_TIPS = [THUMB_TIP, INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP];
+const FINGER_MCPS = [THUMB_MCP, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP];
+
+function processHandLandmarks(results) {
+  if (!results || !results.landmarks || results.landmarks.length === 0) {
+    state.handActive = 0;
+    state.twoHands = false;
+    return;
+  }
+
+  state.handActive = 1;
+  const hand = results.landmarks[0];
+
+  // Palm center (average of wrist + MCP joints)
+  const palm = { x: 0, y: 0, z: 0 };
+  const palmPoints = [WRIST, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP];
+  for (const idx of palmPoints) {
+    palm.x += hand[idx].x;
+    palm.y += hand[idx].y;
+    palm.z += hand[idx].z;
+  }
+  palm.x /= palmPoints.length;
+  palm.y /= palmPoints.length;
+  palm.z /= palmPoints.length;
+
+  // Map to 3D space: MediaPipe gives 0-1, map to approx -3 to 3
+  // Mirror x-axis (webcam is mirrored)
+  state.handPos.set(
+    -(palm.x - 0.5) * 8,
+    -(palm.y - 0.5) * 6,
+    -(palm.z) * 4
+  );
+
+  // Velocity for wave detection
+  state.palmVelocity.copy(state.handPos).sub(state.prevPalmPos);
+  state.prevPalmPos.copy(state.handPos);
+
+  // Finger extension detection
+  for (let i = 0; i < 5; i++) {
+    const tipDist = Math.hypot(
+      hand[FINGER_TIPS[i]].x - hand[WRIST].x,
+      hand[FINGER_TIPS[i]].y - hand[WRIST].y
+    );
+    const mcpDist = Math.hypot(
+      hand[FINGER_MCPS[i]].x - hand[WRIST].x,
+      hand[FINGER_MCPS[i]].y - hand[WRIST].y
+    );
+    state.fingerExtended[i] = tipDist > mcpDist * 1.1;
+  }
+
+  // Pinch distance (thumb tip to index tip)
+  state.pinchDist = Math.hypot(
+    hand[THUMB_TIP].x - hand[INDEX_TIP].x,
+    hand[THUMB_TIP].y - hand[INDEX_TIP].y,
+    hand[THUMB_TIP].z - hand[INDEX_TIP].z
+  );
+
+  // Gesture detection
+  const extCount = state.fingerExtended.filter(Boolean).length;
+  const prevGesture = state.gesture;
+
+  if (state.pinchDist < 0.05) {
+    state.gesture = 2; // pinch
+    if (prevGesture !== 2) {
+      // Trigger pinch burst
+      state.pinchBurst.velocity = 3;
+      state.pinchBurst.value = 1;
+    }
+  } else if (extCount >= 4) {
+    state.gesture = 1; // open palm
+  } else if (extCount <= 1) {
+    state.gesture = -1; // fist
+  } else {
+    state.gesture = 0; // neutral
+  }
+
+  // Two hands mode
+  if (results.landmarks.length >= 2) {
+    state.twoHands = true;
+    const hand2 = results.landmarks[1];
+    const palm2 = { x: 0, y: 0, z: 0 };
+    for (const idx of palmPoints) {
+      palm2.x += hand2[idx].x;
+      palm2.y += hand2[idx].y;
+      palm2.z += hand2[idx].z;
+    }
+    palm2.x /= palmPoints.length;
+    palm2.y /= palmPoints.length;
+    palm2.z /= palmPoints.length;
+    state.secondHandPos.set(
+      -(palm2.x - 0.5) * 8,
+      -(palm2.y - 0.5) * 6,
+      -(palm2.z) * 4
+    );
+  } else {
+    state.twoHands = false;
+  }
+}
+
+// Gesture label for display
+function gestureLabel() {
+  if (state.handActive < 0.5) return '';
+  switch (state.gesture) {
+    case 1: return 'open palm';
+    case -1: return 'fist';
+    case 2: return 'pinch';
+    default: return 'hand';
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// WEBCAM SETUP
+// ═══════════════════════════════════════════════════════
+
+const video = document.getElementById('webcam');
+let videoReady = false;
+
+async function setupWebcam() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }
+    });
+    video.srcObject = stream;
+    await video.play();
+    videoReady = true;
+    updateStatus('webcam: on');
+    return true;
+  } catch (e) {
+    console.warn('Webcam not available:', e);
+    updateStatus('webcam: off');
+    return false;
+  }
+}
+
+// ═══════════════════════════════════════════════════════
+// STATUS + UI
+// ═══════════════════════════════════════════════════════
+
+const statusEl = document.getElementById('status');
+const gestureEl = document.getElementById('gesture');
+
+function updateStatus(msg) {
+  statusEl.textContent = msg;
+}
+
+// ═══════════════════════════════════════════════════════
+// ANIMATION LOOP
+// ═══════════════════════════════════════════════════════
+
+const clock = new THREE.Clock();
+let lastHandDetect = 0;
+const HAND_DETECT_INTERVAL = 33; // ~30fps for hand detection
+
+function animate() {
+  requestAnimationFrame(animate);
+
+  const dt = Math.min(clock.getDelta(), 0.05); // cap delta time
+  state.time += dt;
+  const t = state.time;
+
+  // ── Audio analysis ──
+  analyzeAudio();
+  const bass = state.bassSmooth.step(state.bass, dt);
+  const mid = state.midSmooth.step(state.mid, dt);
+  const treble = state.trebleSmooth.step(state.treble, dt);
+
+  // ── Hand detection ──
+  const now = performance.now();
+  if (handDetector && videoReady && now - lastHandDetect > HAND_DETECT_INTERVAL) {
+    try {
+      const results = handDetector.detectForVideo(video, now);
+      processHandLandmarks(results);
+    } catch (e) {
+      // Silently continue
+    }
+    lastHandDetect = now;
+  }
+
+  // ── Smooth hand position (ExpTween) ──
+  state.handPosSmooth.x = expTween(state.handPosSmooth.x, state.handPos.x, 10, dt);
+  state.handPosSmooth.y = expTween(state.handPosSmooth.y, state.handPos.y, 10, dt);
+  state.handPosSmooth.z = expTween(state.handPosSmooth.z, state.handPos.z, 10, dt);
+
+  const gestureVal = state.gestureSmooth.step(state.gesture, dt);
+  const pinchBurst = state.pinchBurst.step(0, dt);
+
+  // ── Hue slow drift ──
+  state.hue = (state.hue + dt * 0.02) % 1;
+
+  // ── Update gesture display ──
+  const label = gestureLabel();
+  gestureEl.textContent = label + (state.twoHands ? ' (mirror)' : '');
+
+  // ── Update uniforms ──
+  const sharedUniforms = {
+    uTime: t,
+    uHandPos: state.handPosSmooth,
+    uHandActive: state.handActive,
+    uBass: bass,
+    uMid: mid,
+    uTreble: treble,
+    uHue: state.hue,
+  };
+
+  // Background
+  bgMaterial.uniforms.uTime.value = t;
+  bgMaterial.uniforms.uHandPos.value.copy(state.handPosSmooth);
+  bgMaterial.uniforms.uHandActive.value = state.handActive;
+  bgMaterial.uniforms.uBass.value = bass;
+  bgMaterial.uniforms.uMid.value = mid;
+  bgMaterial.uniforms.uTreble.value = treble;
+  bgMaterial.uniforms.uHue.value = state.hue;
+
+  // Particles
+  particleMaterial.uniforms.uTime.value = t;
+  particleMaterial.uniforms.uHandPos.value.copy(state.handPosSmooth);
+  particleMaterial.uniforms.uHandActive.value = state.handActive;
+  particleMaterial.uniforms.uBass.value = bass;
+  particleMaterial.uniforms.uMid.value = mid;
+  particleMaterial.uniforms.uTreble.value = treble;
+  particleMaterial.uniforms.uHue.value = state.hue;
+  particleMaterial.uniforms.uGesture.value = gestureVal;
+  particleMaterial.uniforms.uPinchBurst.value = pinchBurst;
+
+  // Mesh
+  meshMaterial.uniforms.uTime.value = t;
+  meshMaterial.uniforms.uHandPos.value.copy(state.handPosSmooth);
+  meshMaterial.uniforms.uHandActive.value = state.handActive;
+  meshMaterial.uniforms.uBass.value = bass;
+  meshMaterial.uniforms.uMid.value = mid;
+  meshMaterial.uniforms.uTreble.value = treble;
+  meshMaterial.uniforms.uHue.value = state.hue;
+
+  // ── Mesh rotation follows hand ──
+  if (state.handActive > 0.5) {
+    const targetRotX = state.handPosSmooth.y * 0.3;
+    const targetRotY = state.handPosSmooth.x * 0.3;
+    icoMesh.rotation.x = expTween(icoMesh.rotation.x, targetRotX, 3, dt);
+    icoMesh.rotation.y = expTween(icoMesh.rotation.y, targetRotY, 3, dt);
+  } else {
+    icoMesh.rotation.x += dt * 0.2;
+    icoMesh.rotation.y += dt * 0.3;
+  }
+
+  // Bass pulse on mesh scale
+  const baseScale = 1.0 + bass * 0.4;
+  icoMesh.scale.setScalar(expTween(icoMesh.scale.x, baseScale, 8, dt));
+
+  // ── Two hands mirror mode ──
+  if (state.twoHands) {
+    mirrorMesh.visible = true;
+    mirrorMesh.position.copy(state.secondHandPos).multiplyScalar(0.3);
+    mirrorMesh.rotation.copy(icoMesh.rotation);
+    mirrorMesh.rotation.y *= -1;
+    mirrorMesh.scale.copy(icoMesh.scale);
+    mirrorMesh.material.uniforms.uTime.value = t;
+    mirrorMesh.material.uniforms.uBass.value = bass;
+    mirrorMesh.material.uniforms.uMid.value = mid;
+    mirrorMesh.material.uniforms.uTreble.value = treble;
+    mirrorMesh.material.uniforms.uHue.value = state.hue + 0.5;
+    mirrorMesh.material.uniforms.uHandPos.value.copy(state.secondHandPos);
+    mirrorMesh.material.uniforms.uHandActive.value = 1;
+  } else {
+    mirrorMesh.visible = false;
+  }
+
+  // ── Wave gesture → ripple (quick velocity on x) ──
+  const waveSpeed = Math.abs(state.palmVelocity.x);
+  if (waveSpeed > 0.3) {
+    bloomPass.strength = Math.min(2.0, 0.8 + waveSpeed * 0.5);
+  } else {
+    bloomPass.strength = expTween(bloomPass.strength, 0.6 + bass * 0.8, 4, dt);
+  }
+
+  // ── Render ──
+  renderer.autoClear = false;
+  renderer.clear();
+  renderer.render(bgScene, bgCamera);     // background first
+  composer.render();                        // main scene with bloom
+}
+
+// ═══════════════════════════════════════════════════════
+// START
+// ═══════════════════════════════════════════════════════
+
+document.getElementById('startBtn').addEventListener('click', async () => {
+  const overlay = document.getElementById('overlay');
+  overlay.classList.add('hidden');
+  setTimeout(() => overlay.style.display = 'none', 800);
+
+  updateStatus('initializing...');
+
+  // Start all inputs in parallel
+  const [webcamOk, audioOk] = await Promise.all([
+    setupWebcam(),
+    setupAudio(),
+  ]);
+
+  if (webcamOk) {
+    await setupHandTracking();
+  }
+
+  updateStatus(
+    `webcam: ${webcamOk ? 'on' : 'off'} | ` +
+    `mic: ${audioOk ? 'on' : 'off'} | ` +
+    `hands: ${handDetector ? 'on' : 'off'}`
+  );
+
+  // Start animation
+  clock.start();
+  animate();
+});
+</script>
+</body>
+</html>
