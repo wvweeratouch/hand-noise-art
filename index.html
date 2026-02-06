@@ -24,13 +24,42 @@
   }
   #startBtn:hover { background: rgba(255,255,255,0.08); }
   #info { position: fixed; bottom: 0.8rem; left: 0.8rem; color: rgba(255,255,255,0.3); font: 0.7rem monospace; z-index: 50; pointer-events: none; }
+  #debug {
+    position: fixed; bottom: 0; right: 0; z-index: 60; pointer-events: none;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 2px; padding: 6px;
+  }
+  #debug canvas { border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; }
+  #debug .label { color: rgba(255,255,255,0.4); font: 0.6rem monospace; text-align: right; }
+  #webcamPreview {
+    position: fixed; top: 8px; left: 8px; z-index: 60;
+    border: 1px solid rgba(255,255,255,0.15); border-radius: 4px;
+    opacity: 0.5;
+  }
+  #motionDot {
+    position: fixed; width: 16px; height: 16px; border-radius: 50%;
+    background: rgba(255,100,200,0.6); box-shadow: 0 0 12px rgba(255,100,200,0.4);
+    z-index: 55; pointer-events: none; transform: translate(-50%,-50%);
+    transition: left 0.05s, top 0.05s;
+    display: none;
+  }
 </style>
 </head>
 <body>
 
+<video id="webcamPreview" width="120" height="90" autoplay playsinline muted style="display:none"></video>
+<div id="motionDot"></div>
+
+<div id="debug">
+  <div class="label">waveform</div>
+  <canvas id="waveCanvas" width="200" height="60"></canvas>
+  <div class="label">frequency</div>
+  <canvas id="freqCanvas" width="200" height="60"></canvas>
+  <div class="label" id="audioNums">bass: 0 | mid: 0 | treble: 0</div>
+</div>
+
 <div id="overlay">
   <h1>Noise Art</h1>
-  <p>sound + touch + flow — by Bri-yarni</p>
+  <p>sound + camera + touch — by Bri-yarni</p>
   <button id="startBtn">Begin</button>
 </div>
 <div id="info"></div>
@@ -102,9 +131,10 @@ function noise3(x, y, z) {
 // AUDIO
 // ═══════════════════════════════════════════════════════
 
-let audioCtx, analyser, audioData;
+let audioCtx, analyser, audioData, waveData;
 let bass=0, mid=0, treble=0;
 let bS=0, mS=0, tS=0; // smoothed
+let gainNode; // for speaker passthrough
 
 async function setupAudio() {
   try {
@@ -112,10 +142,18 @@ async function setupAudio() {
     audioCtx = new AudioContext();
     const src = audioCtx.createMediaStreamSource(stream);
     analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 256;
-    analyser.smoothingTimeConstant = 0.8;
+    analyser.fftSize = 512;
+    analyser.smoothingTimeConstant = 0.75;
     src.connect(analyser);
     audioData = new Uint8Array(analyser.frequencyBinCount);
+    waveData = new Uint8Array(analyser.fftSize);
+
+    // Audio passthrough to speaker (with gain control to avoid feedback)
+    gainNode = audioCtx.createGain();
+    gainNode.gain.value = 0.5;
+    src.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
     return true;
   } catch(e) { return false; }
 }
@@ -146,6 +184,164 @@ window.addEventListener('pointermove', e => {
 });
 window.addEventListener('pointerdown', () => mouse.down = true);
 window.addEventListener('pointerup', () => mouse.down = false);
+
+// ═══════════════════════════════════════════════════════
+// WAVEFORM + FREQUENCY DEBUG DISPLAY
+// ═══════════════════════════════════════════════════════
+
+const waveCanvas = document.getElementById('waveCanvas');
+const waveCtx = waveCanvas.getContext('2d');
+const freqCanvas = document.getElementById('freqCanvas');
+const freqCtx = freqCanvas.getContext('2d');
+const audioNums = document.getElementById('audioNums');
+
+function drawDebugAudio() {
+  if (!analyser) return;
+
+  const W = waveCanvas.width, H = waveCanvas.height;
+
+  // ── Waveform (time domain) ──
+  analyser.getByteTimeDomainData(waveData);
+  waveCtx.fillStyle = 'rgba(6,6,16,0.85)';
+  waveCtx.fillRect(0, 0, W, H);
+  waveCtx.beginPath();
+  waveCtx.strokeStyle = '#4af';
+  waveCtx.lineWidth = 1.5;
+  const sliceW = W / waveData.length;
+  for (let i = 0; i < waveData.length; i++) {
+    const v = waveData[i] / 128.0; // 0-2 range, 1 = center
+    const y = (v * H) / 2;
+    if (i === 0) waveCtx.moveTo(0, y);
+    else waveCtx.lineTo(i * sliceW, y);
+  }
+  waveCtx.stroke();
+  // Center line
+  waveCtx.strokeStyle = 'rgba(255,255,255,0.1)';
+  waveCtx.lineWidth = 0.5;
+  waveCtx.beginPath();
+  waveCtx.moveTo(0, H/2);
+  waveCtx.lineTo(W, H/2);
+  waveCtx.stroke();
+
+  // ── Frequency bars ──
+  const FW = freqCanvas.width, FH = freqCanvas.height;
+  freqCtx.fillStyle = 'rgba(6,6,16,0.85)';
+  freqCtx.fillRect(0, 0, FW, FH);
+
+  const bins = audioData.length;
+  const barW = FW / bins;
+  const bEnd = Math.floor(bins * 0.15);
+  const mEnd = Math.floor(bins * 0.5);
+
+  for (let i = 0; i < bins; i++) {
+    const v = audioData[i] / 255;
+    const barH = v * FH;
+    // Color by band
+    if (i < bEnd) freqCtx.fillStyle = `rgba(68,102,255,${0.5+v*0.5})`;
+    else if (i < mEnd) freqCtx.fillStyle = `rgba(170,68,255,${0.5+v*0.5})`;
+    else freqCtx.fillStyle = `rgba(255,68,136,${0.5+v*0.5})`;
+    freqCtx.fillRect(i * barW, FH - barH, Math.max(barW - 0.5, 1), barH);
+  }
+
+  // Band divider lines
+  freqCtx.strokeStyle = 'rgba(255,255,255,0.2)';
+  freqCtx.lineWidth = 0.5;
+  freqCtx.beginPath();
+  freqCtx.moveTo(bEnd * barW, 0); freqCtx.lineTo(bEnd * barW, FH);
+  freqCtx.moveTo(mEnd * barW, 0); freqCtx.lineTo(mEnd * barW, FH);
+  freqCtx.stroke();
+
+  // Numbers
+  audioNums.textContent = `bass: ${bS.toFixed(2)} | mid: ${mS.toFixed(2)} | treble: ${tS.toFixed(2)}`;
+}
+
+// ═══════════════════════════════════════════════════════
+// WEBCAM MOTION TRACKING (lightweight — no MediaPipe)
+// ═══════════════════════════════════════════════════════
+
+const video = document.getElementById('webcamPreview');
+const motionDot = document.getElementById('motionDot');
+let motionCanvas, motionCtx;
+let prevFrame = null;
+let motionX = 0.5, motionY = 0.5; // normalized 0-1
+let motionActive = false;
+const MOTION_W = 80, MOTION_H = 60; // tiny resolution for speed
+
+async function setupWebcam() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 320 }, height: { ideal: 240 } }
+    });
+    video.srcObject = stream;
+    video.style.display = 'block';
+    await video.play();
+
+    // Hidden canvas for frame differencing
+    motionCanvas = document.createElement('canvas');
+    motionCanvas.width = MOTION_W;
+    motionCanvas.height = MOTION_H;
+    motionCtx = motionCanvas.getContext('2d', { willReadFrequently: true });
+
+    motionDot.style.display = 'block';
+    motionActive = true;
+    return true;
+  } catch(e) {
+    console.warn('Webcam unavailable:', e);
+    return false;
+  }
+}
+
+let motionFrame = 0;
+function detectMotion() {
+  if (!motionActive) return;
+
+  // Only run every 3 frames (~20fps)
+  motionFrame++;
+  if (motionFrame % 3 !== 0) return;
+
+  motionCtx.drawImage(video, 0, 0, MOTION_W, MOTION_H);
+  const frame = motionCtx.getImageData(0, 0, MOTION_W, MOTION_H);
+  const data = frame.data;
+
+  if (prevFrame) {
+    let sumX = 0, sumY = 0, sumWeight = 0;
+
+    for (let y = 0; y < MOTION_H; y++) {
+      for (let x = 0; x < MOTION_W; x++) {
+        const idx = (y * MOTION_W + x) * 4;
+        // Grayscale difference
+        const curr = (data[idx] + data[idx+1] + data[idx+2]) / 3;
+        const prev = (prevFrame[idx] + prevFrame[idx+1] + prevFrame[idx+2]) / 3;
+        const diff = Math.abs(curr - prev);
+
+        if (diff > 25) { // threshold — ignore noise
+          sumX += x * diff;
+          sumY += y * diff;
+          sumWeight += diff;
+        }
+      }
+    }
+
+    if (sumWeight > 500) { // enough motion detected
+      // Mirror X (webcam is mirrored)
+      motionX = 1 - (sumX / sumWeight) / MOTION_W;
+      motionY = (sumY / sumWeight) / MOTION_H;
+
+      // Update dot position on screen
+      motionDot.style.left = (motionX * window.innerWidth) + 'px';
+      motionDot.style.top = (motionY * window.innerHeight) + 'px';
+      motionDot.style.opacity = '0.7';
+
+      // Feed into mouse-like input (overrides mouse when motion detected)
+      mouse.x = motionX * 2 - 1;
+      mouse.y = -(motionY * 2 - 1);
+    } else {
+      motionDot.style.opacity = '0.15';
+    }
+  }
+
+  prevFrame = new Uint8ClampedArray(data);
+}
 
 // ═══════════════════════════════════════════════════════
 // THREE.JS SCENE
@@ -404,6 +600,12 @@ function animate() {
   // ── Fog density reacts to audio ──
   scene.fog.density = 0.1 + bS * 0.05;
 
+  // ── Webcam motion tracking ──
+  detectMotion();
+
+  // ── Debug audio display ──
+  drawDebugAudio();
+
   // ── Render ──
   renderer.render(scene, camera);
 }
@@ -419,10 +621,12 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   overlay.classList.add('hidden');
   setTimeout(() => overlay.style.display = 'none', 800);
 
-  const micOk = await setupAudio();
-  info.textContent = micOk
-    ? 'mic on — make noise or play music | drag to interact'
-    : 'mic off — drag to interact';
+  const [micOk, camOk] = await Promise.all([setupAudio(), setupWebcam()]);
+  const parts = [];
+  parts.push(micOk ? 'mic: on (speaker passthrough)' : 'mic: off');
+  parts.push(camOk ? 'cam: on (motion tracking)' : 'cam: off');
+  parts.push('drag to interact');
+  info.textContent = parts.join(' | ');
 
   clock.start();
   animate();
