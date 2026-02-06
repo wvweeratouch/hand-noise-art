@@ -251,14 +251,14 @@ void main() {
   // Color from audio spectrum
   float hue = uHue + vColorMix * 0.3 + uTreble * 0.1;
   float sat = 0.6 + uMid * 0.3;
-  float lit = 0.4 + uBass * 0.3;
+  float lit = 0.3 + uBass * 0.2;
   vec3 color = hsl2rgb(mod(hue, 1.0), sat, lit);
 
   // Proximity glow near hand
-  float handGlow = smoothstep(3.0, 0.5, vDist) * 0.3;
+  float handGlow = smoothstep(3.0, 0.5, vDist) * 0.2;
   color += handGlow;
 
-  gl_FragColor = vec4(color, alpha);
+  gl_FragColor = vec4(color, alpha * 0.7);
 }
 `;
 
@@ -287,7 +287,7 @@ void main() {
   // Noise displacement — KlakMath Noise.Float equivalent
   float noiseFreq = 1.2 + uTreble * 3.0;
   float noiseAmp = 0.15 + uBass * 0.6;
-  float displacement = fbm(pos * noiseFreq + uTime * 0.4, 4) * noiseAmp;
+  float displacement = fbm(pos * noiseFreq + uTime * 0.4, 3) * noiseAmp;
 
   // Audio pulse
   displacement += sin(uTime * 3.0) * uBass * 0.1;
@@ -388,8 +388,8 @@ void main() {
   vec3 noisePos = vec3(uv * aspect * 2.0, uTime * 0.15);
   float noiseFreq = 1.5 + uTreble * 2.0;
 
-  float n1 = fbm(noisePos * noiseFreq, 4);
-  float n2 = fbm(noisePos * noiseFreq * 0.5 + vec3(5.0, 3.0, uTime * 0.1), 3);
+  float n1 = fbm(noisePos * noiseFreq, 3);
+  float n2 = fbm(noisePos * noiseFreq * 0.5 + vec3(5.0, 3.0, uTime * 0.1), 2);
 
   // Hand distortion
   if (uHandActive > 0.5) {
@@ -497,7 +497,7 @@ const state = {
 
 const canvas = document.getElementById('canvas');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 
 const scene = new THREE.Scene();
@@ -507,10 +507,11 @@ camera.position.z = 5;
 // Post-processing
 const composer = new EffectComposer(renderer);
 composer.addPass(new RenderPass(scene, camera));
-const bloomPass = new UnrealBloomPass(
-  new THREE.Vector2(window.innerWidth, window.innerHeight),
-  0.8, 0.4, 0.85
+const bloomSize = new THREE.Vector2(
+  Math.floor(window.innerWidth / 2),
+  Math.floor(window.innerHeight / 2)
 );
+const bloomPass = new UnrealBloomPass(bloomSize, 0.4, 0.3, 0.9);
 composer.addPass(bloomPass);
 
 window.addEventListener('resize', () => {
@@ -546,18 +547,16 @@ const bgMaterial = new THREE.ShaderMaterial({
 
 const bgMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMaterial);
 bgMesh.frustumCulled = false;
-bgMesh.renderOrder = -1;
+bgMesh.renderOrder = -1000;
 
-// Use a separate scene for background
-const bgScene = new THREE.Scene();
-const bgCamera = new THREE.Camera();
-bgScene.add(bgMesh);
+// Add background to main scene (so EffectComposer captures it)
+scene.add(bgMesh);
 
 // ═══════════════════════════════════════════════════════
 // LAYER 1: PARTICLE CLOUD (10k particles)
 // ═══════════════════════════════════════════════════════
 
-const PARTICLE_COUNT = 10000;
+const PARTICLE_COUNT = 4000;
 const particleGeo = new THREE.BufferGeometry();
 
 const positions = new Float32Array(PARTICLE_COUNT * 3);
@@ -611,7 +610,7 @@ scene.add(particles);
 // LAYER 2: DEFORMABLE MESH (icosphere)
 // ═══════════════════════════════════════════════════════
 
-const icoGeo = new THREE.IcosahedronGeometry(1.2, 5);
+const icoGeo = new THREE.IcosahedronGeometry(1.2, 3);
 const meshMaterial = new THREE.ShaderMaterial({
   vertexShader: meshVertexShader,
   fragmentShader: meshFragmentShader,
@@ -879,7 +878,7 @@ function updateStatus(msg) {
 
 const clock = new THREE.Clock();
 let lastHandDetect = 0;
-const HAND_DETECT_INTERVAL = 33; // ~30fps for hand detection
+const HAND_DETECT_INTERVAL = 66; // ~15fps for hand detection
 
 function animate() {
   requestAnimationFrame(animate);
@@ -997,16 +996,13 @@ function animate() {
   // ── Wave gesture → ripple (quick velocity on x) ──
   const waveSpeed = Math.abs(state.palmVelocity.x);
   if (waveSpeed > 0.3) {
-    bloomPass.strength = Math.min(2.0, 0.8 + waveSpeed * 0.5);
+    bloomPass.strength = Math.min(0.8, 0.4 + waveSpeed * 0.3);
   } else {
-    bloomPass.strength = expTween(bloomPass.strength, 0.6 + bass * 0.8, 4, dt);
+    bloomPass.strength = expTween(bloomPass.strength, 0.3 + bass * 0.3, 4, dt);
   }
 
-  // ── Render ──
-  renderer.autoClear = false;
-  renderer.clear();
-  renderer.render(bgScene, bgCamera);     // background first
-  composer.render();                        // main scene with bloom
+  // ── Render (single pass — composer handles everything) ──
+  composer.render();
 }
 
 // ═══════════════════════════════════════════════════════
