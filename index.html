@@ -8,6 +8,7 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #060610; }
   canvas { display: block; }
+  #flowCanvas { position: fixed; inset: 0; z-index: 0; width: 100%; height: 100%; }
   #overlay {
     position: fixed; inset: 0;
     display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -46,6 +47,7 @@
 </head>
 <body>
 
+<canvas id="flowCanvas"></canvas>
 <video id="webcamPreview" width="120" height="90" autoplay playsinline muted style="display:none"></video>
 <div id="motionDot"></div>
 
@@ -344,19 +346,211 @@ function detectMotion() {
 }
 
 // ═══════════════════════════════════════════════════════
+// STARRY NIGHT FLOW FIELD (2D canvas layer behind Three.js)
+// ═══════════════════════════════════════════════════════
+
+const flowCanvas = document.getElementById('flowCanvas');
+const flowCtx = flowCanvas.getContext('2d');
+let FW, FH;
+
+// Flow field grid
+const FCELL = 10;
+let fCols, fRows, fField, fTemp;
+
+// Flow particles
+const FCOUNT = 2000;
+const fParticles = [];
+
+function initFlow() {
+  const dpr = Math.min(devicePixelRatio, 1.5);
+  FW = Math.floor(window.innerWidth * dpr);
+  FH = Math.floor(window.innerHeight * dpr);
+  flowCanvas.width = FW;
+  flowCanvas.height = FH;
+
+  fCols = Math.ceil(FW / FCELL);
+  fRows = Math.ceil(FH / FCELL);
+  fField = new Float32Array(fCols * fRows);
+  fTemp = new Float32Array(fCols * fRows);
+
+  // Init particles
+  fParticles.length = 0;
+  for (let i = 0; i < FCOUNT; i++) {
+    fParticles.push({
+      x: Math.random() * FW,
+      y: Math.random() * FH,
+      px: 0, py: 0,
+      life: 0,
+      maxLife: 50 + Math.random() * 100,
+      speed: 0.8 + Math.random() * 1.2,
+    });
+    fParticles[i].px = fParticles[i].x;
+    fParticles[i].py = fParticles[i].y;
+  }
+
+  // Fill canvas with dark base
+  flowCtx.fillStyle = '#060610';
+  flowCtx.fillRect(0, 0, FW, FH);
+}
+
+// Starry Night palette — noise → color
+// Deep navy, bright blue, cyan swirls, yellow stars, white highlights
+function starryColor(n, x, y, t) {
+  // n is noise value ~-1 to 1
+  // Second noise layer for "star" spots
+  const starNoise = noise3(x * 0.01, y * 0.01, t * 0.3 + 50);
+
+  let h, s, l;
+
+  if (starNoise > 0.6) {
+    // Yellow stars / bright spots
+    h = 45 + n * 10;
+    s = 80 + n * 15;
+    l = 55 + starNoise * 25;
+  } else if (n > 0.3) {
+    // Bright blue swirls
+    h = 200 + n * 20;
+    s = 70 + n * 20;
+    l = 35 + n * 15;
+  } else if (n > -0.2) {
+    // Medium blue / cyan
+    h = 215 + n * 15;
+    s = 55 + n * 15;
+    l = 20 + (n + 0.2) * 20;
+  } else {
+    // Deep navy / dark
+    h = 230 + n * 10;
+    s = 40;
+    l = 8 + (n + 1) * 8;
+  }
+
+  return `hsl(${h},${s}%,${l}%)`;
+}
+
+function updateFlowField(t, noiseScale, noiseSpeed) {
+  const tt = t * noiseSpeed;
+  for (let y = 0; y < fRows; y++) {
+    for (let x = 0; x < fCols; x++) {
+      fField[y * fCols + x] = noise3(x * noiseScale, y * noiseScale, tt) * Math.PI * 2;
+    }
+  }
+}
+
+function addFlowForce(mx, my, dx, dy, radius) {
+  const cx = Math.floor(mx / FCELL);
+  const cy = Math.floor(my / FCELL);
+  const r = Math.ceil(radius / FCELL);
+  const angle = Math.atan2(dy, dx);
+  const mag = Math.min(Math.hypot(dx, dy), 40) * 0.12;
+
+  for (let iy = -r; iy <= r; iy++) {
+    for (let ix = -r; ix <= r; ix++) {
+      const gx = cx + ix, gy = cy + iy;
+      if (gx < 0 || gx >= fCols || gy < 0 || gy >= fRows) continue;
+      if (ix*ix + iy*iy > r*r) continue;
+      const falloff = 1 - Math.sqrt(ix*ix + iy*iy) / r;
+      fTemp[gy * fCols + gx] += angle * mag * falloff * 0.05;
+    }
+  }
+}
+
+let flowFieldFrame = 0;
+
+function drawFlow(t, dt) {
+  // Update field every 3 frames
+  flowFieldFrame++;
+  if (flowFieldFrame % 3 === 0) {
+    const ns = 0.006 + tS * 0.008;
+    const nsp = 0.06 + bS * 0.12;
+    updateFlowField(t, ns, nsp);
+  }
+
+  // Decay temp field
+  for (let i = 0; i < fTemp.length; i++) fTemp[i] *= 0.992;
+
+  // Fade trail
+  const fadeAlpha = 0.015 + bS * 0.025;
+  flowCtx.fillStyle = `rgba(6, 6, 16, ${fadeAlpha})`;
+  flowCtx.fillRect(0, 0, FW, FH);
+
+  // Update + draw particles
+  flowCtx.lineCap = 'round';
+  const speedMul = 1.0 + bS * 2.5;
+
+  for (const p of fParticles) {
+    p.px = p.x;
+    p.py = p.y;
+
+    // Get flow angle
+    const gx = Math.floor(p.x / FCELL);
+    const gy = Math.floor(p.y / FCELL);
+    let angle = 0;
+    if (gx >= 0 && gx < fCols && gy >= 0 && gy < fRows) {
+      const idx = gy * fCols + gx;
+      angle = fField[idx] + fTemp[idx];
+    }
+
+    const spd = p.speed * speedMul;
+    p.x += Math.cos(angle) * spd;
+    p.y += Math.sin(angle) * spd;
+    p.life++;
+
+    // Respawn
+    if (p.x < 0 || p.x > FW || p.y < 0 || p.y > FH || p.life > p.maxLife) {
+      p.x = Math.random() * FW;
+      p.y = Math.random() * FH;
+      p.px = p.x;
+      p.py = p.y;
+      p.life = 0;
+      p.maxLife = 50 + Math.random() * 100;
+    }
+
+    if (p.life < 1) continue;
+
+    // Color from Starry Night palette
+    const n = noise3(p.x * 0.003, p.y * 0.003, t * 0.04);
+    const color = starryColor(n, p.x, p.y, t);
+
+    // Alpha: fade in/out over life
+    const lifeRatio = p.life / p.maxLife;
+    const alpha = Math.min(p.life / 6, 1) * (1 - lifeRatio * lifeRatio) * 0.7;
+
+    const lw = 0.8 + bS * 1.2;
+
+    flowCtx.beginPath();
+    flowCtx.moveTo(p.px, p.py);
+    flowCtx.lineTo(p.x, p.y);
+    flowCtx.strokeStyle = color;
+    flowCtx.globalAlpha = alpha;
+    flowCtx.lineWidth = lw;
+    flowCtx.stroke();
+  }
+  flowCtx.globalAlpha = 1;
+
+  // Mouse/motion force on flow field
+  if (mouse.down) {
+    const mx = (mouse.x * 0.5 + 0.5) * FW;
+    const my = (-mouse.y * 0.5 + 0.5) * FH;
+    // Use motion from previous frame
+    addFlowForce(mx, my, mouse.x * 20, -mouse.y * 20, 60);
+  }
+}
+
+// ═══════════════════════════════════════════════════════
 // THREE.JS SCENE
 // ═══════════════════════════════════════════════════════
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.0;
-document.body.prepend(renderer.domElement);
+renderer.domElement.style.cssText = 'position:fixed;inset:0;z-index:1;pointer-events:auto;';
+document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x060610);
-scene.fog = new THREE.FogExp2(0x060610, 0.12);
+scene.background = null; // transparent — flow canvas shows through
+scene.fog = new THREE.FogExp2(0x060610, 0.08);
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth/window.innerHeight, 0.1, 50);
 camera.position.z = 6;
@@ -365,6 +559,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  initFlow(); // resize flow canvas too
 });
 
 // ═══════════════════════════════════════════════════════
@@ -600,13 +795,16 @@ function animate() {
   // ── Fog density reacts to audio ──
   scene.fog.density = 0.1 + bS * 0.05;
 
+  // ── Starry Night flow field (behind Three.js) ──
+  drawFlow(time, dt);
+
   // ── Webcam motion tracking ──
   detectMotion();
 
   // ── Debug audio display ──
   drawDebugAudio();
 
-  // ── Render ──
+  // ── Render Three.js (transparent, on top of flow) ──
   renderer.render(scene, camera);
 }
 
@@ -621,6 +819,7 @@ document.getElementById('startBtn').addEventListener('click', async () => {
   overlay.classList.add('hidden');
   setTimeout(() => overlay.style.display = 'none', 800);
 
+  initFlow();
   const [micOk, camOk] = await Promise.all([setupAudio(), setupWebcam()]);
   const parts = [];
   parts.push(micOk ? 'mic: on (speaker passthrough)' : 'mic: off');
